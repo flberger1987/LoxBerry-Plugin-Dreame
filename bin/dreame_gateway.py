@@ -893,6 +893,15 @@ async def _get_props_batch(
     result = await send_command(session, brand, access_token, did, "get_properties", params)
     if result is None:
         return None
+    code = result.get("code")
+    if code not in (None, 0):
+        # Cloud-level error, not a "poisoned" batch: e.g. 80001 "device may be
+        # offline, command timed out" (answered after ~8 s). Splitting cannot
+        # help — for an offline robot it turned one poll into 211 requests
+        # (~28 min), which also blocked the whole gateway start-up.
+        LOGDEB(f"[{did}] get_properties: cloud code {code} "
+               f"({result.get('msg') or result.get('message') or ''})")
+        return None
     out = {}
     for item in (result.get("data") or {}).get("result", []):
         siid = item.get("siid")
@@ -2347,6 +2356,8 @@ async def _async_main() -> None:
         tasks_coro = []
 
         for device in devices:
+            if _shutdown_event.is_set():   # SIGTERM during start-up: stop here
+                break
             did = device["did"]
 
             # Mower: load settings at startup
