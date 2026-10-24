@@ -1926,6 +1926,9 @@ _MOWER_POLL_PROPS = [
 ]
 
 
+_OFFLINE_AFTER_POLLS = 3   # polls in a row without an answer before "online" goes false
+
+
 async def task_state_poll(
     device: dict,
     broker: dict,
@@ -1942,6 +1945,10 @@ async def task_state_poll(
     current_props: dict = initial_props.copy() if initial_props else {}
     poll_props = _VACUUM_POLL_PROPS if dt == "vacuum" else _MOWER_POLL_PROPS
     mqtt_kwargs = _build_mqtt_kwargs(broker)
+    # "online" starts as the cloud device list's flag, which is read once at start-up
+    # and is false while the robot sleeps. Afterwards it follows the polls: an answer
+    # sets it, _OFFLINE_AFTER_POLLS polls in a row without one clear it.
+    failed_polls = 0
 
     while not _shutdown_event.is_set():
         interval = int(cfg.get("state_poll_interval_sec", 60))
@@ -1950,11 +1957,17 @@ async def task_state_poll(
             break
         try:
             new_props = await get_properties(session, brand, cfg["access_token"], did, poll_props)
-            if not new_props:
-                continue
+            failed_polls = 0 if new_props else failed_polls + 1
+            online = bool(new_props) or bool(device.get("online") and failed_polls < _OFFLINE_AFTER_POLLS)
+            online_changed = online != bool(device.get("online"))
+            device["online"] = online
             changed = {k: v for k, v in new_props.items() if current_props.get(k) != v}
-            if not changed:
+            if not changed and not online_changed:
                 continue
+            if online_changed:
+                LOGINF(f"[{did}] {'answers again' if online else f'no answer for {failed_polls} polls'} → online={online}")
+            if not current_props and not new_props:
+                continue                     # nothing known yet: no state of zeros
             current_props.update(new_props)
             state = build_state_json(device, current_props)
             if dt == "mower" and mower_settings:
