@@ -2261,15 +2261,21 @@ async def _async_main() -> None:
                 # Resolve property names (D+A static, B = MIoT spec only if needed)
                 # before the first publish so state keys are descriptive from the start.
                 await ensure_prop_names(session, device, initial_props)
-                mqtt_kwargs = _build_mqtt_kwargs(broker)
-                async with aiomqtt.Client(**mqtt_kwargs) as lbmqtt:
-                    state = build_state_json(device, initial_props)
-                    if mower_settings:
-                        state.update({k: v for k, v in mower_settings.items() if not k.startswith("_")})
-                    await _publish_retained(lbmqtt, f"{base_topic}/{did}/state", json.dumps(state))
-                    if device["device_type"] == "vacuum":
-                        station = build_station_json(initial_props)
-                        await _publish_retained(lbmqtt, f"{base_topic}/{did}/state_station", json.dumps(station))
+                if not initial_props:
+                    # Robot asleep or offline (cloud code 80001): a state built from
+                    # nothing is all zeros (battery 0 …) and would replace the retained
+                    # one of the last run; the poll publishes once the robot answers.
+                    LOGWARN(f"[{did}] No values from the cloud yet — keeping the last published state")
+                else:
+                    mqtt_kwargs = _build_mqtt_kwargs(broker)
+                    async with aiomqtt.Client(**mqtt_kwargs) as lbmqtt:
+                        state = build_state_json(device, initial_props)
+                        if mower_settings:
+                            state.update({k: v for k, v in mower_settings.items() if not k.startswith("_")})
+                        await _publish_retained(lbmqtt, f"{base_topic}/{did}/state", json.dumps(state))
+                        if device["device_type"] == "vacuum":
+                            station = build_station_json(initial_props)
+                            await _publish_retained(lbmqtt, f"{base_topic}/{did}/state_station", json.dumps(station))
             except Exception as e:
                 LOGWARN(f"[{did}] Initial props error: {e}")
 
