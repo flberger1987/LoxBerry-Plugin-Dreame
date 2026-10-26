@@ -1102,15 +1102,22 @@ async def load_statistic(
     did: str,
     device_type: str,
 ) -> dict:
-    """Load consumable/statistic properties per device type."""
+    """Load consumable/statistic properties per device type.
+
+    Returns None when the cloud sent no values (robot asleep or offline, code
+    80001); a property it did not send is None, so the caller can keep its last
+    published value instead of a 0.
+    """
     if device_type == "mower":
         props = await get_properties(session, brand, access_token, did, [
             (12, 2), (12, 3), (12, 4),
         ])
+        if not props:
+            return None
         return {
-            "total_mow_time_min": props.get((12, 2), 0),
-            "total_mow_count":    props.get((12, 3), 0),
-            "total_mow_area_m2":  props.get((12, 4), 0),
+            "total_mow_time_min": props.get((12, 2)),
+            "total_mow_count":    props.get((12, 3)),
+            "total_mow_area_m2":  props.get((12, 4)),
         }
     else:
         props = await get_properties(session, brand, access_token, did, [
@@ -1118,20 +1125,22 @@ async def load_statistic(
             (9, 1), (9, 2), (10, 1), (10, 2),
             (11, 1), (11, 2), (16, 1), (30, 1),
         ])
+        if not props:
+            return None
         return {
-            "first_cleaning_date":     props.get((12, 1), 0),
-            "total_cleaning_time_min": props.get((12, 2), 0),
-            "cleaning_count":          props.get((12, 3), 0),
-            "total_cleaned_area_m2":   props.get((12, 4), 0),
+            "first_cleaning_date":     props.get((12, 1)),
+            "total_cleaning_time_min": props.get((12, 2)),
+            "cleaning_count":          props.get((12, 3)),
+            "total_cleaned_area_m2":   props.get((12, 4)),
             # hours on piid 1, percent on piid 2 (see _VACUUM_PROP_NAMES)
-            "main_brush_left_pct":     props.get((9,  2), 0),
-            "main_brush_time_left_h":  props.get((9,  1), 0),
-            "side_brush_left_pct":     props.get((10, 2), 0),
-            "side_brush_time_left_h":  props.get((10, 1), 0),
-            "filter_left_pct":         props.get((11, 1), 0),
-            "filter_time_left_h":      props.get((11, 2), 0),
-            "sensor_dirty_left_pct":   props.get((16, 1), 0),
-            "wheel_dirty_left_pct":    props.get((30, 1), 0),
+            "main_brush_left_pct":     props.get((9,  2)),
+            "main_brush_time_left_h":  props.get((9,  1)),
+            "side_brush_left_pct":     props.get((10, 2)),
+            "side_brush_time_left_h":  props.get((10, 1)),
+            "filter_left_pct":         props.get((11, 1)),
+            "filter_time_left_h":      props.get((11, 2)),
+            "sensor_dirty_left_pct":   props.get((16, 1)),
+            "wheel_dirty_left_pct":    props.get((30, 1)),
         }
 
 
@@ -2111,6 +2120,10 @@ async def task_token_refresh(
         await publish_gateway_status(broker, base_topic, cfg)
 
 
+class _NoStatistic(Exception):
+    """The cloud sent no statistic values (robot asleep or offline)."""
+
+
 async def task_statistic_poll(
     devices: list,
     session: aiohttp.ClientSession,
@@ -2131,6 +2144,14 @@ async def task_statistic_poll(
                 stat = await load_statistic(
                     session, brand, cfg["access_token"], did, device["device_type"]
                 )
+                topic = f"{base_topic}/{did}/statistic"
+                if stat is None:
+                    # Robot asleep or offline: a statistic built from nothing is all
+                    # zeros and would replace the retained one; keep it until it answers.
+                    raise _NoStatistic()
+                # a property the cloud left out keeps its last published value
+                last = json.loads(_last_retained.get(topic, "{}"))
+                stat = {k: (v if v is not None else last.get(k, 0)) for k, v in stat.items()}
                 if device["device_type"] == "mower":
                     history = await load_mower_history(
                         session, brand, cfg["access_token"], did, cfg["uid"]
@@ -2143,8 +2164,10 @@ async def task_statistic_poll(
                         stat["last_mow_completed"]    = last.get("completed", False)
                 mqtt_kwargs = _build_mqtt_kwargs(broker)
                 async with aiomqtt.Client(**mqtt_kwargs) as lbmqtt:
-                    await _publish_retained(lbmqtt, f"{base_topic}/{did}/statistic", json.dumps(stat))
+                    await _publish_retained(lbmqtt, topic, json.dumps(stat))
                 LOGDEB(f"[{did}] Statistic published")
+            except _NoStatistic:
+                LOGINF(f"[{did}] No statistic values from the cloud — keeping the last published statistic")
             except Exception as e:
                 LOGERR(f"[{did}] Statistic poll error: {e}")
 
